@@ -4,7 +4,6 @@ import {
   addDoc, 
   deleteDoc, 
   doc, 
-  serverTimestamp, 
   onSnapshot 
 } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
@@ -63,14 +62,49 @@ export const DEFAULT_PRODUCTS = [
   }
 ];
 
-// File to Base64 helper for offline or storage fallback
-const fileToBase64 = (file) => {
+// Helper to compress image file using HTML5 Canvas to a lightweight JPEG (~30KB - 70KB)
+export const compressImageFile = (file, maxWidth = 600, quality = 0.75) => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.readAsDataURL(file);
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = (error) => reject(error);
+    reader.onload = (event) => {
+      const img = new Image();
+      img.src = event.target.result;
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let width = img.width;
+        let height = img.height;
+
+        if (width > maxWidth) {
+          height = Math.round((height * maxWidth) / width);
+          width = maxWidth;
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+
+        const compressedDataUrl = canvas.toDataURL('image/jpeg', quality);
+        resolve(compressedDataUrl);
+      };
+      img.onerror = (err) => reject(err);
+    };
+    reader.onerror = (err) => reject(err);
   });
+};
+
+// Helper for bounded storage upload timeout
+const uploadWithTimeout = (storageRef, file, timeoutMs = 2500) => {
+  return Promise.race([
+    (async () => {
+      const uploadResult = await uploadBytes(storageRef, file);
+      return await getDownloadURL(uploadResult.ref);
+    })(),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("Storage upload timeout")), timeoutMs)
+    )
+  ]);
 };
 
 // Subscribe to products list in real-time
@@ -83,8 +117,9 @@ export const subscribeProducts = (callback) => {
       return {
         id: docSnap.id,
         ...data,
-        // normalize timestamp for sorting
-        createdTime: data.createdAt?.seconds ? data.createdAt.seconds * 1000 : (typeof data.createdAt === 'number' ? data.createdAt : Date.now())
+        createdTime: data.createdAt?.seconds 
+          ? data.createdAt.seconds * 1000 
+          : (typeof data.createdAt === 'number' ? data.createdAt : Date.now())
       };
     });
 
@@ -93,7 +128,6 @@ export const subscribeProducts = (callback) => {
     callback(products);
   }, (error) => {
     console.error("Firestore products snapshot error:", error);
-    // Fallback one-time fetch if listener errors out
     getDocs(productsRef).then((snap) => {
       const prods = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       callback(prods);
@@ -105,19 +139,25 @@ export const subscribeProducts = (callback) => {
 export const addProduct = async (productData, imageFile = null) => {
   let finalImageUrl = productData.imageUrl || "https://images.unsplash.com/photo-1523275335684-37898b6baf30?q=80&w=1000&auto=format&fit=crop";
 
-  // Upload image to Firebase Storage if a File object was provided, or fallback to Base64
+  // If a raw image File object was selected
   if (imageFile && imageFile instanceof File) {
     try {
-      const storageRef = ref(storage, `products/${Date.now()}_${imageFile.name}`);
-      const uploadResult = await uploadBytes(storageRef, imageFile);
-      finalImageUrl = await getDownloadURL(uploadResult.ref);
-    } catch (err) {
-      console.warn("Storage upload fallback to Base64 encoding:", err);
+      // 1. First compress the file to a lightweight data URL
+      const compressedDataUrl = await compressImageFile(imageFile);
+      finalImageUrl = compressedDataUrl;
+
+      // 2. Try Firebase Storage with 2.5s timeout, if storage works use hosted URL
       try {
-        finalImageUrl = await fileToBase64(imageFile);
-      } catch (b64Err) {
-        console.error("Base64 conversion failed:", b64Err);
+        const storageRef = ref(storage, `products/${Date.now()}_${imageFile.name.replace(/[^a-zA-Z0-9.]/g, '_')}`);
+        const downloadUrl = await uploadWithTimeout(storageRef, imageFile, 2500);
+        if (downloadUrl) {
+          finalImageUrl = downloadUrl;
+        }
+      } catch (storageErr) {
+        console.warn("Storage upload skipped or timed out, using compressed image data URL:", storageErr.message);
       }
+    } catch (compressErr) {
+      console.error("Image compression error:", compressErr);
     }
   }
 
@@ -127,7 +167,7 @@ export const addProduct = async (productData, imageFile = null) => {
     description: productData.description || "",
     imageUrl: finalImageUrl,
     badge: productData.badge || null,
-    createdAt: Date.now() // Use numeric timestamp for instant sorting consistency
+    createdAt: Date.now()
   };
 
   const docRef = await addDoc(collection(db, PRODUCTS_COLLECTION), newDoc);

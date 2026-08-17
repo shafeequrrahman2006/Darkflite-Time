@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Sidebar from '../components/Sidebar';
-import { addProduct } from '../services/productService';
+import { addProduct, compressImageFile } from '../services/productService';
 import { Info, Image as ImageIcon, UploadCloud, ArrowLeft, CheckCircle2 } from 'lucide-react';
 
 export default function AdminAddProduct() {
@@ -18,11 +18,16 @@ export default function AdminAddProduct() {
 
   const navigate = useNavigate();
 
-  const handleFileChange = (e) => {
+  const handleFileChange = async (e) => {
     const file = e.target.files?.[0];
     if (file) {
       setImageFile(file);
-      setImagePreview(URL.createObjectURL(file));
+      try {
+        const compressed = await compressImageFile(file);
+        setImagePreview(compressed);
+      } catch (err) {
+        setImagePreview(URL.createObjectURL(file));
+      }
     }
   };
 
@@ -51,13 +56,13 @@ export default function AdminAddProduct() {
       setIsSubmitting(false);
       setSuccessToast(true);
       
-      // Redirect to catalog or home after short delay
+      // Navigate directly to home page so user sees new watch listed immediately!
       setTimeout(() => {
-        navigate('/admin/catalog');
-      }, 1000);
+        navigate('/');
+      }, 800);
     } catch (err) {
       console.error("Failed to publish product:", err);
-      setStatusMsg("Error saving product to Firestore.");
+      setStatusMsg(`Error saving watch: ${err.message || 'Please check fields and try again.'}`);
       setIsSubmitting(false);
     }
   };
@@ -92,7 +97,7 @@ export default function AdminAddProduct() {
         {/* Main Form */}
         <form onSubmit={handlePublish} className="space-y-6">
           
-          {/* Side-by-Side Panels Grid (Compact layout) */}
+          {/* Side-by-Side Panels Grid */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
             
             {/* Left Panel: Core Details (7 cols) */}
@@ -277,9 +282,9 @@ export default function AdminAddProduct() {
 
         {/* Success Toast */}
         {successToast && (
-          <div className="fixed bottom-6 right-6 bg-[#111111] text-white px-5 py-3 rounded-xl shadow-2xl flex items-center gap-2 text-xs font-semibold border border-gray-800">
+          <div className="fixed bottom-6 right-6 bg-[#111111] text-white px-5 py-3 rounded-xl shadow-2xl flex items-center gap-2 text-xs font-semibold border border-gray-800 z-50">
             <CheckCircle2 className="w-4 h-4 text-[#FF9C9A]" />
-            Watch published successfully to catalog!
+            Watch published! Redirecting to user page...
           </div>
         )}
       </main>
